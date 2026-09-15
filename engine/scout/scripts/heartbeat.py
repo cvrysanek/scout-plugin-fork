@@ -9,7 +9,7 @@ all three derived values plus the pgrep / git-status side checks.
 
 Gating order (preserved from bash):
   1. Another ``claude .*scout-`` process already running → skip
-  2. Off-peak detection from ``.scout-config.yaml`` (used by gate 5)
+  2. Off-peak detection from ``scout-config.yaml`` (used by gate 5)
   3. Budget check (delegates to ``scoutctl budget check`` so its tracker
      parse is shared with #87's optimization)
   4. Minimum gap since last session (default 120 min)
@@ -36,9 +36,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from scout import paths
+from scout.scripts._config_scan import scan_overrides
 
 # Defaults mirror heartbeat.sh constants so behavior is preserved when no
-# .scout-config.yaml is present.
+# scout-config.yaml is present.
 DEFAULT_OFF_PEAK_START = 23
 DEFAULT_OFF_PEAK_END = 6
 DEFAULT_MIN_GAP_MINUTES = 120
@@ -51,15 +52,22 @@ EXIT_SKIPPED = 0  # bash returns 0 on intentional skip too
 EXIT_ERROR = 1
 
 _TRACKER_FILENAME = "usage-tracker.jsonl"
-_CONFIG_FILENAME = ".scout-config.yaml"
 _RESEARCH_QUEUE_REL = "knowledge-base/research-queue.md"
 _RESEARCH_QUEUE_DIR_REL = "knowledge-base/research-queue"
 
-_CONFIG_LINE_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([^#\s][^#]*?)\s*(?:#.*)?$")
-
+# Flat spellings — back-compat with hand-made override files.
 _CONFIG_KEYS = {
     "off_peak_start": "off_peak_start",
     "off_peak_end": "off_peak_end",
+}
+
+# The shape /scout-setup actually writes (templates/scout-config.yaml.tmpl):
+#   off_peak:
+#     start: 23
+#     end: 6
+_NESTED_CONFIG_KEYS = {
+    ("off_peak", "start"): "off_peak_start",
+    ("off_peak", "end"): "off_peak_end",
 }
 
 
@@ -77,10 +85,13 @@ class HeartbeatConfig:
 
 
 def load_config(config_path: Path) -> HeartbeatConfig:
-    """Parse only the two scalar keys heartbeat cares about from .scout-config.yaml.
+    """Parse only the off-peak keys heartbeat cares about from scout-config.yaml.
 
     Missing file or unparseable values silently fall back to defaults, matching
-    the bash original's tolerant ``grep | awk`` pattern.
+    the bash original's tolerant ``grep | awk`` pattern. The scan is the shared
+    two-level reader (still no pyyaml on this hot path): it understands both the
+    nested ``off_peak: {start, end}`` shape /scout-setup writes and the flat
+    ``off_peak_start/off_peak_end`` spellings.
     """
     if not config_path.exists():
         return HeartbeatConfig()
@@ -89,14 +100,7 @@ def load_config(config_path: Path) -> HeartbeatConfig:
     except OSError:
         return HeartbeatConfig()
     overrides: dict[str, int] = {}
-    for line in text.splitlines():
-        m = _CONFIG_LINE_RE.match(line)
-        if not m:
-            continue
-        yaml_key, raw_value = m.group(1), m.group(2).strip().strip("\"'")
-        field_name = _CONFIG_KEYS.get(yaml_key)
-        if field_name is None:
-            continue
+    for field_name, raw_value in scan_overrides(text, flat_keys=_CONFIG_KEYS, nested_keys=_NESTED_CONFIG_KEYS).items():
         try:
             overrides[field_name] = int(raw_value)
         except (TypeError, ValueError):
@@ -395,12 +399,18 @@ def launch_runner(runner: Path, *, vault: Path, log_path: Path) -> int:
 # ----- driver -------------------------------------------------------------
 
 
-def _log_line(log_path: Path, reason: str, tz_name: str = "America/New_York") -> None:
-    """Append a timestamped reason line to the heartbeat log."""
-    try:
-        from zoneinfo import ZoneInfo
+def _log_line(log_path: Path, reason: str, tz_name: str | None = None) -> None:
+    """Append a timestamped reason line to the heartbeat log.
 
-        ts = datetime.now(tz=ZoneInfo(tz_name))
+    ``tz_name=None`` resolves the configured zone (#207). Imported lazily so
+    pyyaml stays off this module's import path (see module docstring on cold
+    starts) and is only paid when a line is actually logged.
+    """
+    try:
+        from scout.config import resolve_timezone, timezone_or_default
+
+        zone = timezone_or_default(tz_name) if tz_name else resolve_timezone()
+        ts = datetime.now(tz=zone)
         stamp = ts.strftime("%Y-%m-%d %H:%M %Z")
     except Exception:
         stamp = datetime.now().isoformat(timespec="minutes")
@@ -426,8 +436,16 @@ def run(
     """
     target = data_dir or paths.data_dir()
     tracker_path = paths.logs_dir(target) / _TRACKER_FILENAME
-    config_path = target / _CONFIG_FILENAME
+    # Through paths.config_path — heartbeat's own hardcoded dotted filename
+    # was the file-that-nothing-writes half of #207 (comment thread).
+    config_path = paths.config_path(target)
     log_path = paths.logs_dir(target) / "heartbeat.log"
+
+    # Resolve the vault's configured zone once for every log stamp this tick
+    # (lazy import — keeps pyyaml off the module import path; #207).
+    from scout.config import resolve_timezone as _resolve_tz
+
+    log_tz = _resolve_tz(target).key
 
     config = load_config(config_path)
     n = now or datetime.now(UTC)
@@ -449,22 +467,22 @@ def run(
     )
 
     if decision.action == "skip":
-        _log_line(log_path, f"skipped: {decision.reason}")
+        _log_line(log_path, f"skipped: {decision.reason}", tz_name=log_tz)
         return EXIT_SKIPPED
 
     runner = decision.runner
     assert runner is not None  # "launch" always has a runner
     if dry_run:
-        _log_line(log_path, f"dry_run: would launch {decision.session_type} ({decision.reason})")
+        _log_line(log_path, f"dry_run: would launch {decision.session_type} ({decision.reason})", tz_name=log_tz)
         print(f"would_launch {runner}")
         return EXIT_LAUNCHED
 
     try:
         pid = launch_runner(runner, vault=target, log_path=log_path)
     except OSError as exc:
-        _log_line(log_path, f"launch_failed: {exc}")
+        _log_line(log_path, f"launch_failed: {exc}", tz_name=log_tz)
         return EXIT_ERROR
-    _log_line(log_path, f"launched {decision.session_type} PID={pid} ({decision.reason})")
+    _log_line(log_path, f"launched {decision.session_type} PID={pid} ({decision.reason})", tz_name=log_tz)
     return EXIT_LAUNCHED
 
 

@@ -23,11 +23,13 @@ from pathlib import Path
 
 import yaml
 
+from scout import config as scout_config
 from scout.scripts.bootstrap_doctor import DoctorReport, run_doctor
 from scout.scripts.bootstrap_lock import (
     acquire_lock_with_wait,
     release_lock,
 )
+from scout.scripts.connector_probes import normalize_connector_keys
 from scout.scripts.migrate_perfile import migrate_perfile
 from scout.scripts.phase_assembly import (
     parse_phase_file,
@@ -52,6 +54,13 @@ class BootstrapConfig:
     connector_inputs: dict[str, str]
     skip_jobs: bool = False
     skip_claude: bool = False
+
+    def __post_init__(self) -> None:
+        # Vaults configured before a probe-key rename (gmail → email) carry the
+        # legacy key in connectors.enabled; normalizing at construction covers
+        # every entrypoint (install / upgrade / migrate-legacy / backport) and
+        # lets upgrade persist the canonical key back into scout-config.yaml.
+        self.enabled_connectors = normalize_connector_keys(self.enabled_connectors)
 
 
 @dataclass
@@ -112,6 +121,9 @@ _CAT_MERGE_FILES = {
 }
 
 _CAT1_TEMPLATES = (
+    # scout-tz.sh first: it is the runtime timezone resolver every other script
+    # (and the assembled brain files) call via TZ="$(scripts/scout-tz.sh)".
+    ("scripts/scout-tz.sh", "templates/scripts/scout-tz.sh.tmpl"),
     ("scripts/budget-check.sh", "templates/scripts/budget-check.sh.tmpl"),
     ("scripts/heartbeat.sh", "templates/scripts/heartbeat.sh.tmpl"),
     ("scripts/pre-session-data.sh", "templates/scripts/pre-session-data.sh.tmpl"),
@@ -120,6 +132,7 @@ _CAT1_TEMPLATES = (
     ("scripts/rate-limit-detect.sh", "templates/scripts/rate-limit-detect.sh.tmpl"),
     ("scripts/claude-with-retry.sh", "templates/scripts/claude-with-retry.sh.tmpl"),
     ("scripts/post-session-backfill.sh", "templates/scripts/post-session-backfill.sh.tmpl"),
+    ("scripts/materialize-daily-file.sh", "templates/scripts/materialize-daily-file.sh.tmpl"),
     ("hooks/kb-pre-filter.sh", "templates/hooks/kb-pre-filter.sh.tmpl"),
     (".gitignore", "templates/.gitignore.tmpl"),
 )
@@ -155,7 +168,10 @@ def _template_vars(cfg: BootstrapConfig) -> dict[str, str]:
         "PLATFORM": cfg.platform,
         "MAX_BUDGET": cfg.connector_inputs.get("max_budget", "5.00"),
         "CLAUDE_BIN": cfg.connector_inputs.get("claude_bin", "/usr/local/bin/claude"),
-        "TODAY_DATE": _dt.date.today().isoformat(),
+        # Today in the timezone being installed (NOT the host clock, and not
+        # config.today(): during a fresh install the vault's scout-config.yaml
+        # does not exist yet, so the merged config cannot answer). #207.
+        "TODAY_DATE": _dt.datetime.now(scout_config.timezone_or_default(cfg.timezone)).date().isoformat(),
         "AUTO_UPDATE_ENABLED": cfg.connector_inputs.get("auto_update_enabled", "false"),
     }
 
@@ -215,7 +231,10 @@ def _unique_backup_path(target: Path) -> Path:
     of the day; on a second same-day run, appends ``-1``, ``-2``, ... so an
     earlier run's backup of a different hand-edit is never clobbered (#62).
     """
-    today = _dt.date.today().isoformat()
+    # Configured-zone date (ambient vault resolution) — cosmetic filename
+    # suffix, but it must not flip a day earlier/later than every other
+    # surface near midnight (#207).
+    today = scout_config.today().isoformat()
     base = target.with_name(f"{target.name}.bak.{today}")
     if not base.exists():
         return base

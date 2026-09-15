@@ -54,9 +54,10 @@ Create `action-items/action-items-YYYY-MM-DD.md` using today's date. Include:
 
 ## 🔴 Urgent
 
-- [ ] [#XXXX] **[Item title]** — [Description with specific details, not vague summaries]
+- [ ] [#XXXX] **[Short natural imperative title — no ids/status/emoji/dates]** — [Description with specific details, not vague summaries]
   - Source: [Which connector(s) confirmed this]
   - Context: [[wikilink-to-relevant-kb-file]]
+  - Refs: [[people/slug]] · [[PROJ-1234]] · example-org/repo#1234 · #XREF
 
 ## 🟡 To Do
 
@@ -93,6 +94,19 @@ _Always the LAST section of the file — run metadata is a footer for review, ne
 
 All action items files must include `[[wikilinks]]` to any KB files referenced by action items.
 
+### Hard Rule — Daily-File Completeness Invariant
+
+`action-items/action-items-YYYY-MM-DD.md` must contain the **full carried-forward item list from the moment it exists**. Companion surfaces (scout-app, the TUI) render the daily file as the complete truth — a stub makes every open item invisible until the next full rewrite.
+
+- If today's file does not exist when your session starts, run the deterministic backstop FIRST, then edit on top of the complete file:
+  ```bash
+  scoutctl action-items materialize
+  ```
+  It copies the most recent prior daily file (up to 7 days back) verbatim under a fresh date header and a provisional banner. Idempotent — a no-op when today's file exists. The runner preambles already call it before every session; this in-session call covers sessions launched outside the runners.
+- **NEVER write a section that points at a previous day's file in lieu of the items.** "Carry forward in full from yesterday — see that file" is FORBIDDEN, no matter how lightweight your session is. This binds every session type — briefing, consolidation, research, dreaming, and any auxiliary session that happens to be the day's first writer.
+- When you find the mechanical carry-forward banner at the top of today's file, you are the enriching pass: rewrite the header/focus sections for today, reconcile items normally, and remove the banner. Do not treat the banner as a reason to start a fresh file.
+- This rule complements the continuity rules below: the count-guard and dropoff audit protect the ledger *across* days; this invariant protects the rendered surface *within* the day.
+
 ### Hard Rule — Every Task Line Has a Stable `[#TAG]`
 
 **Every new task line you write MUST start with a stable `[#TAG]` identifier** — 2–8 uppercase letters/digits with at least one letter (e.g. `[#NAHSEND]`, `[#AI3026]`, `[#RSM]`). The tag is the structural identifier scout-app uses to mark tasks done, snooze them, and attach comments — without it, the app falls back to brittle markdown-substring matching that fails on emoji, italics, em-dashes, embedded links, or any non-ASCII drift. Issue #10 of scout-app catalogs the failure modes.
@@ -114,6 +128,7 @@ The tag goes **after** the checkbox marker and **before** the bold subject. Exac
 - 2–8 chars, `[A-Z0-9]`, at least one letter. (Pure-numeric like `[#555]` is reserved for GitHub issue refs and is NOT a valid tag.)
 - **Unique within the file** — never give two open tasks the same tag (scout-app's `--by-id` will refuse an ambiguous tag).
 - **Carry-forward keeps the original tag verbatim.** When propagating an item from yesterday into today, copy its `[#TAG]` exactly — do NOT mint a new one. The tag is the task's identity across days.
+- **Carry-forward rewrites the item into the canonical shape.** When carrying an open item into today's file: keep the `[#TAG]` verbatim and preserve every fact, but re-author the line — clean title per the *Clean Title, Prose Body, Refs Block* hard rule below, narrative into the body, all machine refs consolidated into the `- Refs:` sub-bullet, no inline priority emoji. Do NOT preserve legacy formatting for its own sake. This is how the corpus converges; there is no other migration.
 
 **Existing unprefixed lines (legacy carryover):** when you find a task that lacks a `[#TAG]`, give it one on first touch, or run the idempotent one-shot backfill (it leaves already-tagged lines alone):
 ```bash
@@ -126,6 +141,30 @@ grep -nE '^\s*- \[[ x]\] ' "$DAILY_FILE" | grep -vE ' \[#[A-Z0-9]{2,8}\] ' && \
     echo "ERROR: lines missing [#TAG] prefix above — fix before commit" >&2
 ```
 If that grep finds anything, the file is non-compliant and scout-app's writes will fall back to fragile subject-matching for those lines.
+
+### Hard Rule — Clean Title, Prose Body, Refs Block
+
+The **bold segment is the human-readable title** and must read as a short natural imperative phrase — what to do, in plain words. Keep it scannable (aim for a single line).
+
+The bold title MUST NOT contain any of:
+- the `[#TAG]` (it sits *before* the bold, never inside it);
+- Linear ids (`PROJ-1234`), GitHub refs (`#1234`, `owner/repo#1234`), or cross-reference hashtags (`#SHORTCODE`);
+- status words ("MERGED", "DEPLOYED", "created + self-assigned", "done→todo");
+- dates, times, or quoted snippets;
+- emoji of any kind (including priority 🔴🟡🟢);
+- an internal ` — ` / ` – ` separator (that dash separates title from body).
+
+The **body** (after the ` — ` separator, plus `- Source:` / `- Context:` sub-bullets) is human prose: status, dates, quotes, context. Entity wikilinks (`[[people/alex|Alex]]`) may appear inline in the body ONLY where a name reads naturally in a sentence. Bare machine ids never appear in the body prose.
+
+**All machine refs go in ONE `- Refs:` sub-bullet** directly under the task line, ` · `-separated: Linear ids, GitHub refs, Slack permalinks, cross-reference hashtags, and entity wikilinks that are pure references (not part of a sentence). Omit the sub-bullet when a task has no refs.
+
+**Priority is expressed only by which section the item lives in** (🔴 Urgent / 🟡 To Do / 🟢 Watching). Do NOT prepend a priority emoji to a task line.
+
+Good vs bad (anonymized):
+
+    ✅  - [ ] [#REPLYX] **Reply to Alex about her purchase question** — She said 1/8–1/2; still open per the sweep. Loop in [[people/priya|Priya]] on onboarding.
+    ✅    - Refs: [[people/alex]] · [[PROJ-3026]] · example-org/repo#7056 · #XREF
+    ❌  - [ ] [#REPLYX] 🟡 **Reply to Alex — purchase Q still open (Thu 4:55 PM: "1/8 to 1/2") PROJ-3026** _(carries)_ — …
 
 ### Hard Rule — Trim by Demotion, Never by Omission
 
@@ -227,7 +266,7 @@ During consolidation, also check for completion signals:
 Recurring commitments are **cadence-driven, not event-driven** — a "quiet delta" consolidation must still surface them. This is the load-bearing fix for missed standing commitments (e.g. a weekly Friday status update). If the KB has any `recurring_task` entities, run the cadence computer at compose time:
 
 ```bash
-cd {{SCOUT_DIR}} && python recurring-task-status.py --date "$(TZ={{TIMEZONE}} date '+%Y-%m-%d')"
+cd {{SCOUT_DIR}} && python recurring-task-status.py --date "$(TZ="$(scripts/scout-tz.sh)" date '+%Y-%m-%d')"
 # (script lives at {{SCOUT_DIR}}/scripts/recurring-task-status.py)
 ```
 
@@ -246,6 +285,39 @@ For each entity the script returns:
 4. **`upcoming` / `unknown`** → no action item.
 
 **Do not write "quiet window" / "nothing material" framing until the `due`/`overdue` list is exhausted** — a `weekly:friday` cadence is by definition material on a Friday.
+
+## Task Surface-Rule Triggers (briefing AND every consolidation)
+
+Paired with the recurring-task step above. The `surface_rule` render rule (under Knowledge Graph Personal Tasks) only reads the block *when a task is already being surfaced* — nothing pulls an otherwise-idle task onto the list when one of its declared triggers goes live. This step is the missing driver: the **active** form of the entity's declared surfacing intent, mirroring how the cadence computer drives `recurring_task` entities.
+
+For every open `task` entity (query the parser for `type: task`, keep `status: open`/`in-progress`), read its `surface_rule` and compute the `always_visible_if` triggers from the entity's own fields, in the configured timezone:
+
+- **Deadline-window triggers** (e.g. a "final week before the deadline/return date" trigger) → fire when `0 ≤ (deadline − today) ≤ <window-days>`.
+- **Event-derived triggers** (a schedule change, a budget/threshold anomaly) → fire when *this run's own* connector scan or computed watch value shows the change.
+- **Any `windows` entry** whose `[from, to]` range contains today.
+
+When any trigger or window is live, surface the task as an action item at the window's `surface:` priority (default 🟡; escalate to 🔴 when `always_visible_if` fires, per the render rule) — with **explicit transition framing drawn from the entity** (e.g. *"Final week — N days to the [date] deadline: \<render the entity's prep-task list\>"*), never as a bare day-counter buried in a header. **Forbid "nothing hard-due / quiet day" framing while any task's trigger window is live.** A declared trigger that never fires because no step computed it is a silent-miss bug, not a quiet day.
+
+## Continuity Analysis (briefing)
+
+**Before writing any action items, synthesize the previous day's work into today's priorities.** This is not just carrying items forward — it's connecting what {{USER_NAME}} was working on, what changed overnight, and what today's best use of time is.
+
+For each carryover item from the previous action-items file:
+
+1. **Time-based triggers:** Does the item have an implicit or explicit timer? "Monitoring 2–3 days for clean data" → count the days since the fix; flag when the window is ending. "Wait ~1 week, then build X" → when does the week end? A dated handover/availability window → how many actionable days remain before someone is out?
+2. **Changed context:** Did anything happen overnight (from the connector queries) that changes this item's priority or next step? A PR that was blocked yesterday may have merged; a "waiting on X" item may have gotten its reply.
+3. **Work trajectory:** Based on recent sessions, messages, and commits, what was {{USER_NAME}} MOST focused on? Today's briefing should build on that momentum, not ignore it.
+
+**Output: 2–3 "Today you should…" recommendations** at the TOP of the action items file, above the 🔴 section — synthesized guidance, not new action items:
+
+```markdown
+## 💡 Today's Focus (continuity from yesterday)
+- **Finish X** — [why today is the right day, what changed]
+- **Check Y** — [monitoring window ending, follow-up due]
+- **Prepare for Z** — [meeting coming up, deadline approaching]
+```
+
+This is the file-side counterpart of the wrap-DM continuity line (see the notification phase) — the DM opens with the throughline; this section carries the reasoning.
 
 ## Mandatory Cross-Check
 

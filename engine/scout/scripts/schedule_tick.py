@@ -31,6 +31,7 @@ import datetime as _dt
 import fcntl
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -159,9 +160,13 @@ def _local_tz_name(localtime: Path | None = None) -> str:
     localtime = localtime or Path("/etc/localtime")
     if localtime.is_symlink():
         target = str(localtime.resolve())
-        marker = "zoneinfo/"
-        if marker in target:
-            name = target.split(marker, 1)[1]
+        # The zone name is whatever follows the deepest zoneinfo* directory.
+        # macOS resolves through layouts like /var/db/timezone/tz/<ver>/zoneinfo/
+        # or /usr/share/zoneinfo.default/ depending on whether tzd has run, so
+        # a literal "zoneinfo/" match is not enough.
+        matches = list(re.finditer(r"/zoneinfo[^/]*/", target))
+        if matches:
+            name = target[matches[-1].end() :]
             try:
                 ZoneInfo(name)
                 return name
@@ -172,7 +177,7 @@ def _local_tz_name(localtime: Path | None = None) -> str:
                 )
         else:
             print(
-                "schedule_tick: /etc/localtime target has no 'zoneinfo/' component "
+                "schedule_tick: /etc/localtime target has no zoneinfo directory component "
                 f"({target!r}); falling back to UTC — set $TZ to your IANA zone",
                 file=sys.stderr,
             )
@@ -437,7 +442,17 @@ def _apply_miss_rules(candidates: list[SlotCandidate], *, now: _dt.datetime) -> 
         within_window = (now - c.target) <= window
 
         if policy is OnMissPolicy.SKIP:
-            decisions[c.slot_key] = Decision(action="skip", reason="on_miss=skip")
+            # `skip` means "don't fire *late*", not "never fire". Every candidate
+            # reaching this point is already past its target — _compute_due_slots
+            # filters out `target > now` — so skipping unconditionally left no
+            # code path by which a skip-policy slot could ever fire, silently
+            # disabling all dreaming and research sessions (#193). The per-slot
+            # missed_window_hours is what bounds "late"; beyond it the slot goes
+            # stale exactly as it does under `fire`.
+            if within_window:
+                decisions[c.slot_key] = Decision(action="fire")
+            else:
+                decisions[c.slot_key] = Decision(action="skip", reason="stale-after-window")
             continue
 
         if policy is OnMissPolicy.FIRE:
@@ -692,6 +707,29 @@ def run() -> Event:
         )
 
 
+def _evaluate_triggers(*, vault: Path, log_dir: Path) -> None:
+    """Run trigger evaluation before schedule evaluation. Never raises.
+
+    evaluate() isolates its own per-source/per-trigger failures; this guard
+    exists for the layers above it (import errors, config-path crashes) so
+    the trigger subsystem can never take down slot dispatch.
+    """
+    try:
+        from scout.triggers import engine as triggers_engine
+
+        triggers_engine.evaluate(
+            vault=vault,
+            emit_event=lambda **kw: _emit_event(log_dir, **kw),
+        )
+    except Exception as exc:
+        _emit_event(
+            log_dir,
+            kind="triggers.evaluate.failed",
+            source="cli:schedule_tick",
+            payload={"error": f"{type(exc).__name__}: {exc}"},
+        )
+
+
 def _do_tick(
     *,
     vault: Path,
@@ -700,6 +738,9 @@ def _do_tick(
     tracker_path: Path,
     started_at: float,
 ) -> Event:
+    # Event triggers evaluate first (spec: docs/specs/event-triggers.md §Event flow).
+    _evaluate_triggers(vault=vault, log_dir=log_dir)
+
     schedule = _load_or_default(vault)
     last_fire = _get_last_fire_index(state_dir, tracker_path)
     now = _now()

@@ -52,7 +52,16 @@ def state_dir(data: Path | None = None) -> Path:
 
 
 def config_path(data: Path | None = None) -> Path:
-    return (data or data_dir()) / ".scout-config.yaml"
+    """The vault's config file — ``scout-config.yaml``, NO dot.
+
+    This is the file /scout-setup and bootstrap actually write. The loader
+    historically pointed at ``.scout-config.yaml``, a dotfile no code path
+    ever wrote, which silently disabled the whole user-override layer
+    (#207/#202). The undotted file holds bootstrap state (version stamps,
+    connectors, schedule) alongside user overrides; scout.config.load_config
+    normalizes its legacy key shapes on read.
+    """
+    return (data or data_dir()) / "scout-config.yaml"
 
 
 def kb_dir(data: Path | None = None) -> Path:
@@ -79,18 +88,26 @@ def require_data_dir(data: Path | None = None) -> Path:
     return d
 
 
-def _today() -> _dt.date:
-    """Indirection so tests can monkeypatch the date without freezing time."""
-    return _dt.date.today()
+def _today(data: Path | None = None) -> _dt.date:
+    """Today in the configured day-boundary zone (scout.config.today).
+
+    Indirection so tests can monkeypatch the date without freezing time.
+    Imported lazily: scout.config imports scout.paths, so a module-level
+    import here would be circular.
+    """
+    from scout.config import today
+
+    return today(data)
 
 
 def action_items_daily_path(data: Path | None = None, date: _dt.date | None = None) -> Path:
-    """Return the daily action-items markdown path for `date` (default today).
+    """Return the daily action-items markdown path for `date` (default: today
+    in the configured timezone — see scout.config.today, #207).
 
     Filename format matches the existing ~/Scout convention:
     `action-items-YYYY-MM-DD.md` under the data dir's `action-items/`.
     """
-    d = date or _today()
+    d = date or _today(data)
     return action_items_dir(data) / f"action-items-{d.isoformat()}.md"
 
 
